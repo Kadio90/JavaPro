@@ -2,17 +2,14 @@ package ThreadPool;
 
 import java.util.LinkedList;
 import java.util.List;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingDeque;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class ThreadPool {
-    private final BlockingQueue<Runnable> taskQueue;
+    private final LinkedList<Runnable> taskQueue;
     private final List<WorkerThread> workers;
-    private volatile boolean isShutdown;
+    private final AtomicBoolean isShutdown;
 
     private class WorkerThread extends Thread {
-        private volatile boolean isRunning = true;
 
         public WorkerThread(String name) {
             super(name);
@@ -21,24 +18,34 @@ public class ThreadPool {
 
         @Override
         public void run() {
-            while (isRunning) {
-                try {
-                    Runnable task = taskQueue.poll(100, TimeUnit.MILLISECONDS);
-                    if (task != null) {
-                        task.run();
+            Runnable task;
+            while (!this.isInterrupted()) {
+                synchronized (taskQueue) {
+                    // Ждем, пока не появится задача
+                    if (taskQueue.isEmpty()){
+                        try {
+                            System.out.println(this.getName() + " ждет задачу!");
+                            taskQueue.wait();
+                        } catch (InterruptedException e) {
+                            System.out.println(this.getName() + " ошибка: " + e.getMessage());
+                            continue;
+                        }
                     }
-                } catch (InterruptedException e) {
-                    // Поток был прерван во время ожидания задачи
-                    if (!isRunning) {
+                    // Если shutdown завершаем поток
+                    if (isShutdown.get()) {
+                        System.out.println(this.getName() + " завершает работу по Shutdown!");
                         break;
                     }
+                    // Берем задачу из очереди
+                    task = taskQueue.removeFirst();
+                }
+                // Выполняем задачу
+                try {
+                    task.run();
+                } catch (Exception e) {
+                    System.out.println(this.getName() + "Ошибка выполнения потока: " + e.getMessage());
                 }
             }
-        }
-
-        public void interruptIfIdle() {
-            isRunning = false;
-            this.interrupt();
         }
     }
 
@@ -46,9 +53,9 @@ public class ThreadPool {
         if (capacity <= 0) {
             throw new IllegalArgumentException("Количество потоков должно быть больше 0");
         }
-        this.taskQueue = new LinkedBlockingDeque<>();
+        this.taskQueue = new LinkedList<>();
         this.workers = new LinkedList<>();
-        this.isShutdown = false;
+        this.isShutdown = new AtomicBoolean(false);
 
         // Создаем и запускаем рабочие потоки
         for (int i = 0; i < capacity; i++) {
@@ -59,19 +66,23 @@ public class ThreadPool {
     }
 
     public void execute(Runnable task) {
-        if (isShutdown) {
+        if (isShutdown.get()) {
             throw new IllegalStateException("После shutdown обработка заданий не возможна!");
         }
         if (task == null) {
             throw new NullPointerException("Задача должна существовать!");
         }
-        taskQueue.add(task);
+        synchronized (taskQueue) {
+            taskQueue.addLast(task);
+            taskQueue.notify(); // Будим один из ожидающих потоков
+        }
     }
 
     public void shutdown() {
-        isShutdown = true;
-        for (WorkerThread worker : workers) {
-            worker.interruptIfIdle();
+        System.out.println("Сработал shutdown!");
+        isShutdown.set(true);
+        synchronized (taskQueue) {
+            taskQueue.notifyAll(); // Будим все потоки для проверки состояния shutdown
         }
     }
 
